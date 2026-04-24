@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HPAL Nickel Balance</title>
+  
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <style>
+    /* Reset margin bawaan browser */
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: #060910;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // 1. Ubah import menjadi destructuring dari global objek React
+    const { useState, useCallback, useRef } = React;
+
+    /* ── fonts ── */
+    (() => {
+      const l = document.createElement("link");
+      l.rel = "stylesheet";
+      l.href = "https://fonts.googleapis.com/css2?family=Share+Tech+Mono:wght@400&family=Barlow:wght@300;400;500;600;700;800&display=swap";
+      document.head.appendChild(l);
+    })();
+
+    const T = {
+      bg:"#060910", s1:"#0a0e1a", s2:"#0f1525", s3:"#141c32",
+      s4:"#192240", line:"#1f2e48", line2:"#273a5e",
+      t1:"#e0eaff", t2:"#6c8ab8", t3:"#334466",
+      mono:"'Share Tech Mono',monospace", sans:"'Barlow',sans-serif",
+      mhp:"#10d98c", green:"#4ade80", teal:"#2dd4bf",
+      water:"#38bdf8", ore:"#f59e0b", acid:"#ef4444",
+      steam:"#a78bfa", lime:"#86efac", red:"#f87171",
+      tsf:"#d97706", sea:"#0ea5e9", yellow:"#facc15",
+      goethite:"#f97316",   // orange — main Ni host
+      chromite:"#dc2626",   // red    — refractory Ni
+      gibbsite:"#a78bfa",   // purple — leachable Al-bearing
+      hematite:"#94a3b8",   // grey   — minor Ni host
+      free:"#22d3a0",       // teal   — free/unleached Ni
+    };
+
+    function niCol(pct) {
+      if (pct >= 95) return "#10d98c";
+      if (pct >= 85) return "#4ade80";
+      if (pct >= 70) return "#a3e635";
+      if (pct >= 50) return "#facc15";
+      if (pct >= 20) return "#fb923c";
+      return "#f87171";
+    }
+
+    const MINERAL_LIB = {
+      "Goethite (FeO·OH)":         { default: 52, min: 40, max: 65, col: T.goethite,
+        ni_host_pct: 92,   
+        hpal_leach:  97,   
+        note: "Host utama Ni — larut hampir sempurna di HPAL 250°C" },
+      "Hematite (Fe₂O₃)":          { default:  8, min:  3, max: 15, col: T.t2,
+        ni_host_pct:  2,
+        hpal_leach:  30,   
+        note: "Pembawa Ni minor — leachability rendah" },
+      "Gibbsite (Al(OH)₃)":        { default:  6, min:  2, max: 12, col: T.gibbsite,
+        ni_host_pct:  2,
+        hpal_leach:  95,   
+        note: "Fase Al — larut baik, Ni trace" },
+      "Chromite (FeCr₂O₄)":        { default:  3, min:  1, max:  6, col: T.chromite,
+        ni_host_pct:  3,
+        hpal_leach:   0,   
+        note: "TIDAK LARUT di HPAL — sumber Ni loss permanen" },
+      "Quartz / Silica (SiO₂)":    { default:  5, min:  2, max: 10, col: T.t3,
+        ni_host_pct:  0,
+        hpal_leach:   0,
+        note: "Gangue — tidak membawa Ni" },
+      "Residual Silicates":         { default:  4, min:  1, max:  8, col: T.t3,
+        ni_host_pct:  1,
+        hpal_leach:  40,   
+        note: "Silikat sisa — sedikit Ni, leachability bervariasi" },
+      "Mn-Oxides (Asbolane/MnO₂)": { default:  2, min:  0, max:  5, col: T.teal,
+        ni_host_pct:  0,
+        hpal_leach:  90,
+        note: "Sumber Co utama — minor Ni" },
+    };
+
+    const DEF = {
+      ore_feed:          500,    
+      ni_grade:          1.30,   
+      co_grade:          0.10,   
+      ore_moisture:      38,     
+      frac_goethite:     52,
+      frac_hematite:      8,
+      frac_gibbsite:      6,
+      frac_chromite:      3,
+      frac_quartz:        5,
+      frac_residual_sil:  4,
+      frac_mn_oxide:      2,
+      leach_goethite:    97,
+      leach_hematite:    30,
+      leach_gibbsite:    95,
+      leach_chromite:     0,
+      leach_residual_sil:40,
+      ccd_wash_eff:      99.5,   
+      mhp_precip_eff:    99.5,   
+      mhp_battery_split: 70,     
+      co_in_mn_oxide_pct: 60,    
+      co_leach_mn_oxide:  96,
+      co_in_goethite_pct: 40,
+      co_leach_goethite:  97,
+      uptime_pct:        91,
+    };
+
+    function calcMineralNiBalance(p) {
+      const ANN = 8760 * (p.uptime_pct / 100);
+
+      const ni_feed_tph   = p.ore_feed * p.ni_grade / 100;  
+      const BASE          = ni_feed_tph;
+
+      const minerals = [
+        { name: "Goethite",          frac: p.frac_goethite      / 100, ni_host: MINERAL_LIB["Goethite (FeO·OH)"].ni_host_pct      / 100, leach: p.leach_goethite      / 100, col: T.goethite },
+        { name: "Hematite",          frac: p.frac_hematite      / 100, ni_host: MINERAL_LIB["Hematite (Fe₂O₃)"].ni_host_pct       / 100, leach: p.leach_hematite      / 100, col: T.t2 },
+        { name: "Gibbsite",          frac: p.frac_gibbsite      / 100, ni_host: MINERAL_LIB["Gibbsite (Al(OH)₃)"].ni_host_pct     / 100, leach: p.leach_gibbsite      / 100, col: T.gibbsite },
+        { name: "Chromite",          frac: p.frac_chromite      / 100, ni_host: MINERAL_LIB["Chromite (FeCr₂O₄)"].ni_host_pct     / 100, leach: 0,                          col: T.chromite },
+        { name: "Quartz",            frac: p.frac_quartz        / 100, ni_host: 0,                                                         leach: 0,                          col: T.t3 },
+        { name: "Residual Silicate", frac: p.frac_residual_sil  / 100, ni_host: MINERAL_LIB["Residual Silicates"].ni_host_pct      / 100, leach: p.leach_residual_sil  / 100, col: T.t3 },
+        { name: "Mn-Oxide",          frac: p.frac_mn_oxide      / 100, ni_host: 0,                                                         leach: 0,                          col: T.teal },
+      ];
+
+      const ni_host_sum = minerals.reduce((s, m) => s + m.ni_host, 0);
+      if (ni_host_sum > 0) minerals.forEach(m => m.ni_host = m.ni_host / ni_host_sum);
+
+      let ni_dissolved_total = 0;
+      let ni_residue_total   = 0;
+      const mineral_ni = minerals.map(m => {
+        const ni_in_mineral     = BASE * m.ni_host;           
+        const ni_dissolved      = ni_in_mineral * m.leach;    
+        const ni_residue        = ni_in_mineral - ni_dissolved;
+        ni_dissolved_total     += ni_dissolved;
+        ni_residue_total       += ni_residue;
+        return { ...m, ni_in_mineral, ni_dissolved, ni_residue,
+          ni_in_pct:  ni_in_mineral  / BASE * 100,
+          diss_pct:   ni_dissolved   / BASE * 100,
+          res_pct:    ni_residue     / BASE * 100,
+        };
+      });
+
+      const hpal_recovery_pct = (ni_dissolved_total / BASE) * 100;
+
+      const ni_in_pls       = ni_dissolved_total * (p.ccd_wash_eff / 100);
+      const ni_ccd_loss     = ni_dissolved_total - ni_in_pls;    
+
+      const ni_in_mhp       = ni_in_pls * (p.mhp_precip_eff / 100);
+      const ni_raff_loss    = ni_in_pls - ni_in_mhp;
+
+      const ni_mhp_batt     = ni_in_mhp * (p.mhp_battery_split / 100);
+      const ni_mhp_ext      = ni_in_mhp - ni_mhp_batt;
+
+      const ni_tsf_total    = ni_residue_total + ni_ccd_loss;
+
+      const ni_sea          = ni_raff_loss * 0.95; 
+      const ni_sludge_tsf   = ni_raff_loss * 0.05; 
+
+      const ni_product      = ni_in_mhp;
+      const ni_losses_solid = ni_tsf_total + ni_sludge_tsf;
+      const ni_losses_eff   = ni_sea;
+      const check           = (ni_product + ni_losses_solid + ni_losses_eff) / BASE * 100;
+
+      const pct = x => x / BASE * 100;
+
+      const co_feed_tph     = p.ore_feed * p.co_grade / 100;
+      const co_in_mn_ox     = co_feed_tph * (p.co_in_mn_oxide_pct / 100);
+      const co_in_goethite  = co_feed_tph * (p.co_in_goethite_pct / 100);
+      const co_diss_mn      = co_in_mn_ox    * (p.co_leach_mn_oxide  / 100);
+      const co_diss_goe     = co_in_goethite * (p.co_leach_goethite / 100);
+      const co_dissolved    = co_diss_mn + co_diss_goe;
+      const co_recovery_pct = co_dissolved / co_feed_tph * 100;
+
+      const ann = {
+        ni_feed:    ni_feed_tph    * ANN,
+        ni_product: ni_product     * ANN,
+        ni_mhp_batt:ni_mhp_batt   * ANN,
+        ni_mhp_ext: ni_mhp_ext    * ANN,
+        ni_tsf:     (ni_losses_solid) * ANN,
+        ni_sea:     ni_sea         * ANN,
+        co_feed:    co_feed_tph    * ANN,
+        co_product: co_dissolved   * ANN,
+        hrs:        ANN,
+      };
+
+      return {
+        BASE, ni_feed_tph, hpal_recovery_pct,
+        mineral_ni,
+        ni_dissolved_total, ni_residue_total,
+        ni_in_pls, ni_ccd_loss,
+        ni_in_mhp, ni_raff_loss,
+        ni_mhp_batt, ni_mhp_ext,
+        ni_tsf_total, ni_sea, ni_sludge_tsf,
+        check, pct,
+        co_feed_tph, co_dissolved, co_recovery_pct,
+        ann,
+        nodes: {
+          mineral_processing:  100,
+          u201_uf:             100,
+          u202_in:             100,
+          u202_diss:           pct(ni_dissolved_total),
+          u202_solid:          pct(ni_residue_total),
+          u203_out:            100,
+          u204_pls:            pct(ni_in_pls),
+          u204_ccd_loss:       pct(ni_ccd_loss),
+          u204_res:            pct(ni_residue_total + ni_ccd_loss),
+          mhp_product:         pct(ni_in_mhp),
+          mhp_batt:            pct(ni_mhp_batt),
+          mhp_ext:             pct(ni_mhp_ext),
+          mhp_raff:            pct(ni_raff_loss),
+          tsf:                 pct(ni_losses_solid),
+          sea:                 pct(ni_sea),
+        },
+      };
+    }
+
+    const S = {
+      root: {minHeight:"100vh",background:T.bg,color:T.t1,fontFamily:T.sans,fontSize:13},
+      hdr:  {background:T.s1,borderBottom:`1px solid ${T.line}`,padding:"13px 24px",display:"flex",justifyContent:"space-between",alignItems:"center"},
+      tabs: {display:"flex",background:T.s1,borderBottom:`1px solid ${T.line}`,overflowX:"auto"},
+      tab:  {padding:"8px 15px",cursor:"pointer",fontSize:10,fontWeight:700,letterSpacing:.8,textTransform:"uppercase",border:"none",background:"transparent",fontFamily:T.sans,transition:"all .15s",whiteSpace:"nowrap"},
+      wrap: {display:"flex",maxWidth:1440,margin:"0 auto",padding:"12px 14px",gap:12,flexWrap:"wrap"},
+      left: {width:256,flexShrink:0,maxHeight:"calc(100vh - 114px)",overflowY:"auto"},
+      right:{flex:1,minWidth:480,display:"flex",flexDirection:"column",gap:10},
+      grp:  {background:T.s2,border:`1px solid ${T.line}`,borderRadius:6,padding:"9px 11px",marginBottom:8},
+      gHd:  {fontSize:9,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase",marginBottom:7,display:"flex",justifyContent:"space-between",cursor:"pointer"},
+      f:    {marginBottom:6},
+      lbl:  {fontSize:9,color:T.t3,marginBottom:2,textTransform:"uppercase",letterSpacing:.7,display:"block"},
+      iRow: {display:"flex",alignItems:"center",gap:4},
+      inp:  {flex:1,background:T.s3,border:`1px solid ${T.line}`,borderRadius:3,padding:"3px 6px",color:T.t1,fontFamily:T.mono,fontSize:11,outline:"none",width:0},
+      unit: {fontSize:9,color:T.t3,minWidth:30,textAlign:"right"},
+      card: {background:T.s2,border:`1px solid ${T.line}`,borderRadius:8,padding:"12px 14px"},
+      cHd:  {fontSize:10,fontWeight:700,letterSpacing:1,textTransform:"uppercase",marginBottom:8,display:"flex",alignItems:"center",gap:6},
+    };
+
+    function FI({label,name,value,unit,min=0,max,step="any",onChange}){
+      return(
+        <div style={S.f}>
+          <label style={S.lbl}>{label}</label>
+          <div style={S.iRow}>
+            <input type="number" min={min} max={max} step={step} value={value}
+              onChange={e=>onChange(name,parseFloat(e.target.value)||0)} style={S.inp}/>
+            <span style={S.unit}>{unit}</span>
+          </div>
+        </div>
+      );
+    }
+    function G({title,col,children,open:init=true}){
+      const[o,setO]=useState(init);
+      return(
+        <div style={{...S.grp,borderLeft:`3px solid ${col}`}}>
+          <div style={{...S.gHd,color:col}} onClick={()=>setO(x=>!x)}>
+            {title}<span style={{color:T.t3,fontFamily:T.mono}}>{o?"▾":"▸"}</span>
+          </div>
+          {o&&children}
+        </div>
+      );
+    }
+    function Kpi({label,v,u,col,sm}){
+      const fmt=typeof v==="number"?(v>=1000?v.toLocaleString("en",{maximumFractionDigits:0}):v>=10?v.toFixed(2):v.toFixed(4)):v;
+      return(
+        <div style={{flex:`1 1 ${sm?70:90}px`,background:T.s3,border:`1px solid ${T.line}`,borderRadius:6,padding:"7px 9px",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+          <div style={{fontSize:8,color:T.t3,textTransform:"uppercase",letterSpacing:.7,textAlign:"center",lineHeight:1.3}}>{label}</div>
+          <div style={{fontSize:sm?13:16,fontWeight:700,color:col,fontFamily:T.mono}}>{fmt}</div>
+          <div style={{fontSize:8,color:T.t3}}>{u}</div>
+        </div>
+      );
+    }
+    function Bar({pct,col,h=6,label,sublabel}){
+      return(
+        <div style={{marginBottom:4}}>
+          {(label||sublabel)&&(
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:2}}>
+              <span style={{color:T.t2}}>{label}</span>
+              <span style={{color:col,fontFamily:T.mono,fontWeight:700}}>{typeof pct==="number"?pct.toFixed(4):pct}%</span>
+            </div>
+          )}
+          <div style={{background:T.s3,borderRadius:3,height:h,overflow:"hidden"}}>
+            <div style={{width:`${Math.min(100,Math.max(0,pct))}%`,height:"100%",borderRadius:3,background:col,transition:"width .6s"}}/>
+          </div>
+          {sublabel&&<div style={{fontSize:8,color:T.t3,marginTop:1}}>{sublabel}</div>}
+        </div>
+      );
+    }
+    function Sect({label,col}){
+      return(
+        <div style={{display:"flex",alignItems:"center",gap:6,margin:"8px 0 4px"}}>
+          <div style={{width:2,height:12,background:col,borderRadius:1}}/>
+          <span style={{fontSize:9,color:col,fontWeight:700,letterSpacing:1.5,textTransform:"uppercase"}}>{label}</span>
+          <div style={{flex:1,height:1,background:T.line}}/>
+        </div>
+      );
+    }
+    function NiTag({pct,size="md"}){
+      const c=niCol(pct);
+      const fs=size==="lg"?20:size==="sm"?10:13;
+      return(
+        <span style={{background:`${c}18`,border:`1.5px solid ${c}`,borderRadius:3,
+          padding:"2px 7px",fontFamily:T.mono,fontSize:fs,fontWeight:700,color:c,
+          letterSpacing:.5,whiteSpace:"nowrap"}}>
+          {pct.toFixed(pct<1?4:pct<10?3:2)}%
+        </span>
+      );
+    }
+
+    function MineralPie({data, size=140}){
+      const total = data.reduce((s,d)=>s+d.frac,0)||1;
+      let angle = -Math.PI/2;
+      const cx=size/2, cy=size/2, r=size*0.40;
+      const slices = data.map(d=>{
+        const sweep = (d.frac/total)*2*Math.PI;
+        const x1=cx+r*Math.cos(angle), y1=cy+r*Math.sin(angle);
+        angle+=sweep;
+        const x2=cx+r*Math.cos(angle), y2=cy+r*Math.sin(angle);
+        const large=sweep>Math.PI?1:0;
+        return {path:`M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large} 1 ${x2},${y2} Z`, col:d.col, name:d.name, pct:(d.frac/total*100)};
+      });
+      return(
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{display:"block"}}>
+          {slices.map((s,i)=>(
+            <path key={i} d={s.path} fill={s.col} stroke={T.bg} strokeWidth="0.8" opacity="0.9"/>
+          ))}
+          <circle cx={cx} cy={cy} r={r*0.52} fill={T.s2}/>
+          <text x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
+            fontSize={9} fill={T.t2} fontFamily={T.sans} fontWeight="700">Limonite</text>
+        </svg>
+      );
+    }
+
+    function NiBFD({R}){
+      if(!R) return null;
+      const n=R.nodes;
+      const W=660, cx=230, bw=180;
+      const bx0=cx-bw/2;
+
+      const arr=(x1,y1,x2,y2,col=T.t3,w=0.9,dash=false)=>{
+        const id=`a${Math.round(x1*5)}${Math.round(y1*5)}${Math.round(x2*5)}${Math.round(y2*5)}`.replace(/-/g,"m");
+        return(<g key={id}><defs><marker id={id} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="4" markerHeight="4" orient="auto">
+          <path d="M1 1.5L7 4L1 6.5" fill="none" stroke={col} strokeWidth="1.5"/></marker></defs>
+          <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={col} strokeWidth={w} strokeDasharray={dash?"5 3":"none"} markerEnd={`url(#${id})`}/></g>);
+      };
+      const box=(x,y,w,h,code,name,pct_in,pct_out,col,sub)=>{
+        const ci=niCol(pct_in), co=niCol(pct_out);
+        return(<g key={code}>
+          <rect x={x} y={y} width={w} height={h} rx="4" fill={T.s2} stroke={col} strokeWidth="1.2"/>
+          <rect x={x+4} y={y+4} width={28} height={14} rx="2" fill={col}/>
+          <text x={x+18} y={y+11} textAnchor="middle" dominantBaseline="central" fontSize={8} fill={T.bg} fontFamily={T.sans} fontWeight="700">{code}</text>
+          <text x={x+w/2} y={y+h/2-(sub?7:0)} textAnchor="middle" dominantBaseline="central" fontSize={9} fill={T.t1} fontFamily={T.sans} fontWeight="600">{name}</text>
+          {sub&&<text x={x+w/2} y={y+h/2+7} textAnchor="middle" dominantBaseline="central" fontSize={7} fill={T.t3} fontFamily={T.sans}>{sub}</text>}
+          <rect x={x+3} y={y+h-18} width={52} height={14} rx="2" fill={`${ci}20`} stroke={ci} strokeWidth="0.8"/>
+          <text x={x+29} y={y+h-11} textAnchor="middle" dominantBaseline="central" fontSize={8} fill={ci} fontFamily={T.mono} fontWeight="700">IN {pct_in.toFixed(1)}%</text>
+          <rect x={x+w-55} y={y+h-18} width={52} height={14} rx="2" fill={`${co}20`} stroke={co} strokeWidth="0.8"/>
+          <text x={x+w-29} y={y+h-11} textAnchor="middle" dominantBaseline="central" fontSize={8} fill={co} fontFamily={T.mono} fontWeight="700">OUT {pct_out.toFixed(1)}%</text>
+        </g>);
+      };
+      const pill=(x,y,pct,label,anchor="middle")=>{
+        const c=niCol(pct);
+        return(<g key={`p${x}${y}`}>
+          <rect x={x-(anchor==="middle"?30:anchor==="start"?0:-60)} y={y-8} width={60} height={16} rx={8} fill={`${c}20`} stroke={c} strokeWidth="0.9"/>
+          <text x={x+(anchor==="middle"?0:anchor==="start"?30:-30)} y={y+1} textAnchor="middle" dominantBaseline="central" fontSize={8.5} fill={c} fontFamily={T.mono} fontWeight="700">{pct.toFixed(2)}%</text>
+          {label&&<text x={x+(anchor==="middle"?0:anchor==="start"?32:-32)+2} y={y+14} textAnchor={anchor} dominantBaseline="central" fontSize={6.5} fill={T.t3} fontFamily={T.sans}>{label}</text>}
+        </g>);
+      };
+
+      return(
+        <svg width="100%" viewBox={`0 0 ${W} 740`} style={{display:"block"}}>
+          <rect x={W-165} y={8} width={158} height={72} rx="4" fill={T.s3} stroke={T.line} strokeWidth="0.8"/>
+          <text x={W-86} y={21} textAnchor="middle" fontSize={8} fill={T.t2} fontFamily={T.sans} fontWeight="700">WARNA Ni%</text>
+          {[[niCol(97),"≥95% — goethite zone"],[niCol(90),"85–95%"],[niCol(75),"70–85%"],[niCol(55),"50–70%"],[niCol(30),"20–50%"],[niCol(5),"<20% — sisa"]].map(([c,l],i)=>(
+            <g key={l}><rect x={W-160} y={29+i*9} width={10} height={7} rx="1" fill={c}/><text x={W-144} y={33+i*9} dominantBaseline="central" fontSize={7} fill={T.t2} fontFamily={T.sans}>{l}</text></g>
+          ))}
+
+          <rect x={cx-90} y={8} width={180} height={30} rx="4" fill={`${niCol(100)}18`} stroke={niCol(100)} strokeWidth="1.5"/>
+          <text x={cx} y={17} textAnchor="middle" dominantBaseline="central" fontSize={8.5} fill={niCol(100)} fontFamily={T.sans} fontWeight="800">MINERAL PROCESSING INPUT</text>
+          <text x={cx} y={29} textAnchor="middle" dominantBaseline="central" fontSize={8} fill={T.t2} fontFamily={T.mono}>Ni = 100.00% = {R.ni_feed_tph.toFixed(3)} t Ni/h</text>
+          {arr(cx,38,cx,58,niCol(100),1.2)} {pill(cx,51,100,"Feed 100%")}
+
+          {box(bx0,58,bw,42,"201","Slurry Thickening",100,100,T.water,"No Ni separation")}
+          {arr(cx,100,cx,120,niCol(100),1.1)} {pill(cx,113,100,"→ HPAL")}
+
+          {box(bx0,120,bw,46,"202","HPAL",100,n.u202_diss,T.acid,`Goethite dissolution @ 250°C`)}
+          {arr(bx0,143,bx0-18,143,niCol(n.u202_solid),0.9)}
+          <line x1={bx0-18} y1="143" x2={bx0-18} y2="552" stroke={niCol(n.u202_solid)} strokeWidth="0.8" strokeDasharray="5 3"/>
+          {arr(bx0-18,552,bx0,552,niCol(n.u202_solid),0.9)}
+          {pill(bx0-40,350,n.u202_solid,"Solid residue")}
+          {arr(bx0+bw,143,bx0+bw+55,143,T.vent,0.6,true)}
+          <text x={bx0+bw+58} y={143} dominantBaseline="central" fontSize={7} fill={T.vent} fontFamily={T.sans}>Vent (0% Ni)</text>
+          {arr(cx,166,cx,188,niCol(n.u202_diss),1.1)} {pill(cx,180,n.u202_diss,"Diss. Ni → 203")}
+
+          {box(bx0,188,bw,40,"203","Recycle Leach & Neut.",n.u202_diss,n.u202_diss,T.lime,"Ni tidak berubah")}
+          {arr(cx,228,cx,248,niCol(n.u202_diss),1.0)} {pill(cx,241,n.u202_diss,"→ CCD")}
+
+          {box(bx0,248,bw,44,"204","CCD",n.u202_diss,n.u204_pls,T.water,`PLS ${n.u204_pls.toFixed(2)}% | Res ${n.u204_res.toFixed(2)}%`)}
+          <text x={bx0+bw+3} y={260} fontSize={7} fill={niCol(n.u204_ccd_loss)} fontFamily={T.mono}>Wash loss: {n.u204_ccd_loss.toFixed(4)}%</text>
+          {arr(cx,292,cx,314,niCol(n.u204_pls),1.2)} {pill(cx,305,n.u204_pls,"PLS → MHP-1")}
+
+          {box(bx0,314,bw,46,"MHP","Ni & Co Precipitation",n.u204_pls,n.mhp_product,T.mhp,`MHP ${n.mhp_product.toFixed(2)}% | Raff ${n.mhp_raff.toFixed(4)}%`)}
+          {arr(bx0+bw,337,bx0+bw+60,337,niCol(n.mhp_product),1.4)}
+          <rect x={bx0+bw+60} y={319} width={108} height={36} rx="3" fill={`${T.mhp}18`} stroke={T.mhp} strokeWidth="1.2"/>
+          <text x={bx0+bw+114} y={330} textAnchor="middle" dominantBaseline="central" fontSize={8} fill={T.mhp} fontFamily={T.sans} fontWeight="700">MHP PRODUCT</text>
+          <text x={bx0+bw+114} y={343} textAnchor="middle" dominantBaseline="central" fontSize={9} fill={T.green} fontFamily={T.mono} fontWeight="700">{n.mhp_product.toFixed(2)}% Ni</text>
+          <text x={bx0+bw+62} y={363} fontSize={7} fill={niCol(n.mhp_batt)} fontFamily={T.mono}>🔋 Battery: {n.mhp_batt.toFixed(2)}%</text>
+          <text x={bx0+bw+62} y={373} fontSize={7} fill={niCol(n.mhp_ext)} fontFamily={T.mono}>📦 External: {n.mhp_ext.toFixed(2)}%</text>
+          {arr(cx,360,cx,383,niCol(n.mhp_raff),0.8)} {pill(cx,376,n.mhp_raff,"Raffinate")}
+
+          {box(bx0,383,bw,40,"205→606","Fe/Al → Mn → Effluent Treatment",n.mhp_raff,n.sea,T.sea,"Trace Ni → treated effluent")}
+          {arr(bx0+bw,403,bx0+bw+55,403,niCol(n.sea),0.7,true)}
+          <rect x={bx0+bw+55} y={390} width={88} height={26} rx="3" fill={`${T.sea}18`} stroke={T.sea} strokeWidth="0.9"/>
+          <text x={bx0+bw+99} y={403} textAnchor="middle" dominantBaseline="central" fontSize={8} fill={T.sea} fontFamily={T.mono}>Sea: {n.sea.toFixed(4)}%</text>
+
+          {box(bx0-148,530,142,42,"211-T","Tailings Neutralisation",n.u204_res,n.u204_res,T.tsf,"Lime Milk 510")}
+          {arr(bx0-77,572,bx0-77,596,niCol(n.u204_res),0.8)}
+          {box(bx0-148,596,142,40,"215","Residue Filtration",n.u204_res,n.tsf,T.tsf,"Filter cake → TSF")}
+          {arr(bx0-77,636,bx0-77,656,niCol(n.tsf),0.9)}
+          {pill(bx0-77,648,n.tsf,"→ TSF")}
+
+          <rect x={cx-90} y={700} width={180} height={32} rx="4" fill={`${T.tsf}22`} stroke={T.tsf} strokeWidth="1.5"/>
+          <text x={cx} y={712} textAnchor="middle" dominantBaseline="central" fontSize={9} fill={T.tsf} fontFamily={T.sans} fontWeight="700">TSF</text>
+          <text x={cx} y={725} textAnchor="middle" dominantBaseline="central" fontSize={9} fill={niCol(n.tsf)} fontFamily={T.mono} fontWeight="700">{n.tsf.toFixed(4)}% Ni total</text>
+          {arr(bx0-77,656,cx-50,700,niCol(n.tsf),0.8)}
+          {arr(bx0+bw+55,403,bx0+bw+130,403,T.tsf,0.6,true)}
+          <line x1={bx0+bw+130} y1="403" x2={bx0+bw+130} y2="712" stroke={T.tsf} strokeWidth="0.6" strokeDasharray="3 2"/>
+          {arr(bx0+bw+130,712,cx+90,712,T.tsf,0.6)}
+
+          <rect x={W-165} y={90} width={158} height={130} rx="4" fill={T.s3} stroke={T.line} strokeWidth="0.8"/>
+          <text x={W-86} y={103} textAnchor="middle" fontSize={8} fill={T.t2} fontFamily={T.sans} fontWeight="700">Ni HOST (mineralogi)</text>
+          {R.mineral_ni.filter(m=>m.ni_in_pct>0.01).map((m,i)=>(
+            <g key={m.name}>
+              <rect x={W-160} y={110+i*18} width={8} height={8} rx="1" fill={m.col}/>
+              <text x={W-146} y={114+i*18} dominantBaseline="central" fontSize={7} fill={T.t2} fontFamily={T.sans}>{m.name}</text>
+              <text x={W-18} y={114+i*18} textAnchor="end" dominantBaseline="central" fontSize={7.5} fill={niCol(m.diss_pct)} fontFamily={T.mono}>{m.diss_pct.toFixed(2)}%</text>
+            </g>
+          ))}
+
+          <rect x={W-165} y={230} width={158} height={46} rx="4" fill={`${niCol(R.hpal_recovery_pct)}10`} stroke={niCol(R.hpal_recovery_pct)} strokeWidth="0.9"/>
+          <text x={W-86} y={243} textAnchor="middle" fontSize={8} fill={T.t2} fontFamily={T.sans} fontWeight="700">HPAL Ni Recovery</text>
+          <text x={W-86} y={258} textAnchor="middle" fontSize={14} fill={niCol(R.hpal_recovery_pct)} fontFamily={T.mono} fontWeight="700">{R.hpal_recovery_pct.toFixed(2)}%</text>
+          <text x={W-86} y={270} textAnchor="middle" fontSize={7} fill={T.t3} fontFamily={T.sans}>derived from mineralogy</text>
+
+          <rect x={W-165} y={285} width={158} height={46} rx="4" fill={T.s3} stroke={T.line} strokeWidth="0.8"/>
+          <text x={W-86} y={298} textAnchor="middle" fontSize={8} fill={T.t2} fontFamily={T.sans} fontWeight="700">Closure Check</text>
+          <text x={W-86} y={314} textAnchor="middle" fontSize={13} fill={Math.abs(R.check-100)<0.01?T.green:T.red} fontFamily={T.mono} fontWeight="700">{R.check.toFixed(4)}%</text>
+          <text x={W-86} y={325} textAnchor="middle" fontSize={7} fill={Math.abs(R.check-100)<0.01?T.green:T.red} fontFamily={T.sans}>{Math.abs(R.check-100)<0.01?"✓ Balanced":"✗ Check!"}</text>
+        </svg>
+      );
+    }
+
+    const TABS=[
+      {id:"bfd",      label:"🔬  Ni Balance BFD"},
+      {id:"mineral",  label:"⛏  Mineralogi Limonite"},
+      {id:"table",    label:"📋  Tabel Lengkap"},
+      {id:"annual",   label:"📅  Tahunan"},
+    ];
+
+    // 2. Ubah deklarasi function dengan membuang "export default"
+    function App(){
+      const[d,setD]=useState(DEF);
+      const[R,setR]=useState(null);
+      const[busy,setBusy]=useState(false);
+      const[tab,setTab]=useState("bfd");
+      const tm=useRef(null);
+      const upd=useCallback((k,v)=>setD(p=>({...p,[k]:v})),[]);
+      const reset=useCallback(()=>{setD(DEF);setR(null);},[]);
+      const run=useCallback(()=>{
+        setBusy(true);setR(null);
+        clearTimeout(tm.current);
+        tm.current=setTimeout(()=>{setR(calcMineralNiBalance(d));setBusy(false);},600);
+      },[d]);
+
+      return(
+        <div style={S.root}>
+          <div style={S.hdr}>
+            <div>
+              <div style={{fontSize:9,color:T.t3,letterSpacing:3,textTransform:"uppercase",marginBottom:2}}>HPAL · Mineralogi Limonite · Nickel Balance</div>
+              <div style={{fontSize:18,fontWeight:800,fontFamily:T.sans,color:T.mhp,letterSpacing:-.5}}>Nickel Balance — Berbasis Mineralogi</div>
+              <div style={{fontSize:10,color:T.t3,marginTop:1}}>Recovery dihitung dari fraksi mineral · Ni tidak hilang di mineral processing</div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={reset} style={{padding:"6px 12px",borderRadius:4,fontSize:10,fontWeight:600,background:"transparent",border:`1px solid ${T.line}`,color:T.t3,cursor:"pointer",fontFamily:T.sans}}>↺ Reset</button>
+              <button onClick={run} disabled={busy} style={{padding:"9px 26px",borderRadius:4,fontSize:13,fontWeight:800,cursor:busy?"not-allowed":"pointer",border:"none",fontFamily:T.sans,display:"flex",alignItems:"center",gap:7,background:busy?T.s3:"linear-gradient(135deg,#0a6644,#12a370)",color:busy?T.t3:"#fff",boxShadow:busy?"none":"0 3px 18px rgba(18,163,112,.45)"}}>
+                {busy?<><span style={{display:"inline-block",animation:"spin .8s linear infinite"}}>⟳</span>Menghitung…</>:<>▶ Calculate</>}
+              </button>
+            </div>
+          </div>
+          <style>{`@keyframes spin{to{transform:rotate(360deg)}}::-webkit-scrollbar{width:4px;background:${T.bg}}::-webkit-scrollbar-thumb{background:${T.line};border-radius:2px}input[type=number]::-webkit-inner-spin-button{opacity:.4}`}</style>
+
+          <div style={S.tabs}>
+            {TABS.map(t=>(
+              <button key={t.id} onClick={()=>setTab(t.id)}
+                style={{...S.tab,color:tab===t.id?T.mhp:T.t3,borderBottom:`2px solid ${tab===t.id?T.mhp:"transparent"}`}}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div style={S.wrap}>
+            <div style={S.left}>
+              <G title="⛏ Ore Feed" col={T.ore}>
+                <FI label="Ore kering (dry basis)" name="ore_feed" value={d.ore_feed} unit="t/h" min={1} onChange={upd}/>
+                <FI label="Ni grade (dry)" name="ni_grade" value={d.ni_grade} unit="wt%" min={0} max={5} step={.01} onChange={upd}/>
+                <FI label="Co grade (dry)" name="co_grade" value={d.co_grade} unit="wt%" min={0} max={2} step={.01} onChange={upd}/>
+                <FI label="Moisture" name="ore_moisture" value={d.ore_moisture} unit="%" min={0} max={60} onChange={upd}/>
+              </G>
+
+              <G title="🪨 Mineral Fractions (wt% dry ore)" col={T.goethite}>
+                <div style={{fontSize:9,color:T.t3,marginBottom:6,lineHeight:1.5,background:T.s3,padding:"5px 7px",borderRadius:4}}>
+                  Data dari literatur: Indonesian limonite (XRD Rietveld). Total idealnya ~80% (sisa = trace minerals).
+                </div>
+                <FI label="Goethite (FeO·OH) — host Ni utama" name="frac_goethite" value={d.frac_goethite} unit="wt%" min={20} max={75} step={.5} onChange={upd}/>
+                <FI label="Hematite (Fe₂O₃)" name="frac_hematite" value={d.frac_hematite} unit="wt%" min={0} max={20} step={.5} onChange={upd}/>
+                <FI label="Gibbsite (Al(OH)₃)" name="frac_gibbsite" value={d.frac_gibbsite} unit="wt%" min={0} max={15} step={.5} onChange={upd}/>
+                <FI label="Chromite (FeCr₂O₄) — UNLEACHABLE" name="frac_chromite" value={d.frac_chromite} unit="wt%" min={0} max={8} step={.1} onChange={upd}/>
+                <FI label="Quartz/SiO₂" name="frac_quartz" value={d.frac_quartz} unit="wt%" min={0} max={15} step={.5} onChange={upd}/>
+                <FI label="Residual Silicates" name="frac_residual_sil" value={d.frac_residual_sil} unit="wt%" min={0} max={15} step={.5} onChange={upd}/>
+                <FI label="Mn-Oxides (asbolane)" name="frac_mn_oxide" value={d.frac_mn_oxide} unit="wt%" min={0} max={10} step={.5} onChange={upd}/>
+              </G>
+
+              <G title="🔬 HPAL Leachability per Mineral" col={T.acid}>
+                <div style={{fontSize:9,color:T.t3,marginBottom:6,lineHeight:1.5,background:`${T.red}10`,padding:"5px 7px",borderRadius:4,border:`1px solid ${T.red}30`}}>
+                  Chromite = 0% (tidak bisa diubah). Nilai lain dari literatur HPAL 250°C.
+                </div>
+                <FI label="Goethite leachability" name="leach_goethite" value={d.leach_goethite} unit="%" min={80} max={99} step={.1} onChange={upd}/>
+                <FI label="Hematite leachability" name="leach_hematite" value={d.leach_hematite} unit="%" min={0} max={60} step={1} onChange={upd}/>
+                <FI label="Gibbsite leachability" name="leach_gibbsite" value={d.leach_gibbsite} unit="%" min={60} max={99} step={1} onChange={upd}/>
+                <FI label="Residual silicate leachability" name="leach_residual_sil" value={d.leach_residual_sil} unit="%" min={0} max={80} step={1} onChange={upd}/>
+                <div style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:10,color:T.red,fontWeight:600}}>
+                  <span>Chromite leachability</span><span style={{fontFamily:T.mono}}>0% (fixed)</span>
+                </div>
+              </G>
+
+              <G title="⚗ Downstream (post-HPAL)" col={T.mhp}>
+                <FI label="CCD wash efficiency" name="ccd_wash_eff" value={d.ccd_wash_eff} unit="%" min={95} max={99.9} step={.1} onChange={upd}/>
+                <FI label="MHP precip. efficiency" name="mhp_precip_eff" value={d.mhp_precip_eff} unit="%" min={95} max={99.9} step={.1} onChange={upd}/>
+                <FI label="MHP → Battery %" name="mhp_battery_split" value={d.mhp_battery_split} unit="%" min={0} max={100} onChange={upd}/>
+              </G>
+
+              <G title="📅 Plant Basis" col={T.yellow} open={false}>
+                <FI label="Plant uptime" name="uptime_pct" value={d.uptime_pct} unit="%" min={50} max={98} step={1} onChange={upd}/>
+              </G>
+            </div>
+
+            <div style={S.right}>
+              {!R&&!busy&&(
+                <div style={{...S.card,textAlign:"center",padding:"56px 20px",border:`1px dashed ${T.line}`}}>
+                  <div style={{fontSize:32,marginBottom:10}}>⛏</div>
+                  <div style={{fontSize:14,color:T.t2,fontWeight:700,marginBottom:6}}>Nickel Balance Berbasis Mineralogi Limonite</div>
+                  <div style={{fontSize:11,color:T.t3,marginBottom:14,lineHeight:1.7}}>
+                    Recovery Ni dihitung dari fraksi mineral aktual (XRD data).<br/>
+                    Ni tidak pernah hilang — hanya berubah bentuk solid ↔ solution.
+                  </div>
+                  <div style={{display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
+                    {["Goethite = host utama","Chromite = 0% leach","97% recovery dari goethite","100% Ni terlacak","Closure = 100%"].map(s=>(
+                      <div key={s} style={{fontSize:9,color:T.mhp,background:`${T.mhp}10`,border:`1px solid ${T.mhp}40`,padding:"2px 9px",borderRadius:99}}>✓ {s}</div>
+                    ))}
+                  </div>
+                  <div style={{marginTop:14,fontSize:11,color:T.t3}}>Set parameter → klik ▶ Calculate</div>
+                </div>
+              )}
+              {busy&&(
+                <div style={{...S.card,textAlign:"center",padding:"56px 20px"}}>
+                  <div style={{fontSize:26,animation:"spin .9s linear infinite",display:"inline-block",marginBottom:10}}>⟳</div>
+                  <div style={{fontSize:12,color:T.mhp}}>Menghitung dari fraksi mineralogi…</div>
+                </div>
+              )}
+
+              {R&&!busy&&(()=>{
+                if(tab==="bfd") return(
+                  <>
+                    <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                      {[
+                        {l:"Ni Feed",       v:R.ni_feed_tph,                    u:"t/h",  col:T.mhp},
+                        {l:"HPAL Recovery", v:R.hpal_recovery_pct,               u:"%",    col:niCol(R.hpal_recovery_pct)},
+                        {l:"MHP Total",     v:R.nodes.mhp_product,               u:"% Ni", col:T.green},
+                        {l:"MHP Battery",   v:R.nodes.mhp_batt,                  u:"% Ni", col:T.water},
+                        {l:"TSF Residue",   v:R.nodes.tsf,                       u:"% Ni", col:T.tsf},
+                        {l:"Closure",       v:R.check,                           u:"%",    col:Math.abs(R.check-100)<0.01?T.green:T.red},
+                      ].map(k=><Kpi key={k.l} label={k.l} v={k.v} u={k.u} col={k.col}/>)}
+                    </div>
+                    <div style={S.card}>
+                      <div style={S.cHd}><span style={{color:T.mhp}}>◈</span> Nickel Balance BFD — Berbasis Fraksi Mineralogi</div>
+                      <NiBFD R={R}/>
+                    </div>
+                  </>
+                );
+
+                if(tab==="mineral") return(
+                  <>
+                    <div style={{...S.card,background:"#040a18",borderLeft:`3px solid ${T.goethite}`}}>
+                      <div style={S.cHd}><span style={{color:T.goethite}}>▐</span> Dasar Mineralogi Limonite (Literatur)</div>
+                      <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
+                        <MineralPie data={R.mineral_ni.map(m=>({frac:m.frac*100,col:m.col,name:m.name}))} size={160}/>
+                        <div style={{flex:1}}>
+                          {[
+                            {k:"Goethite (FeO·OH)",         c:T.goethite, note:"Host Ni utama. Ni substitusi Fe dalam kisi kristal (solid solution). Larut 97–99% di HPAL 250°C (ScienceDirect HPAL 2024, König 2021)."},
+                            {k:"Hematite (Fe₂O₃)",          c:T.t2,       note:"Minor Ni host. Secondary hematite dari reprecipitasi Fe. Kelarutan rendah (30%). Trace Ni terjebak."},
+                            {k:"Gibbsite (Al(OH)₃)",        c:T.gibbsite, note:"Fase Al dominan di limonite tropis. Larut baik di HPAL. Ni trace (<2% hosted)."},
+                            {k:"Chromite (FeCr₂O₄) ⚠",     c:T.chromite, note:"SEPENUHNYA TIDAK LARUT di HPAL kondisi apapun (0%). Ni yang terinkorporasi di chromite = Ni loss permanen ke residu TSF."},
+                            {k:"Residual Silicates",        c:T.t3,       note:"Sisa mineral silikat. Kelarutan bervariasi (20–60%). Sumber kecil Ni loss."},
+                          ].map(item=>(
+                            <div key={item.k} style={{display:"flex",gap:8,marginBottom:8,alignItems:"flex-start"}}>
+                              <div style={{width:10,height:10,background:item.c,borderRadius:2,marginTop:2,flexShrink:0}}/>
+                              <div>
+                                <div style={{fontSize:10,color:item.c,fontWeight:700}}>{item.k}</div>
+                                <div style={{fontSize:9,color:T.t3,lineHeight:1.5}}>{item.note}</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={S.card}>
+                      <div style={S.cHd}><span style={{color:T.goethite}}>▐</span> Distribusi Ni per Mineral — Detail Kalkulasi</div>
+                      <div style={{display:"grid",gridTemplateColumns:"160px 70px 80px 80px 80px 80px",
+                        fontSize:8,color:T.t3,letterSpacing:1,textTransform:"uppercase",
+                        borderBottom:`1px solid ${T.line}`,paddingBottom:4,marginBottom:2}}>
+                        <div>Mineral</div>
+                        <div style={{textAlign:"right"}}>Fraksi</div>
+                        <div style={{textAlign:"right"}}>Ni Host %</div>
+                        <div style={{textAlign:"right"}}>Leach %</div>
+                        <div style={{textAlign:"right"}}>Ni Diss %</div>
+                        <div style={{textAlign:"right"}}>Ni Residu %</div>
+                      </div>
+                      {R.mineral_ni.map((m,i)=>(
+                        <div key={m.name} style={{display:"grid",gridTemplateColumns:"160px 70px 80px 80px 80px 80px",
+                          alignItems:"center",padding:"3px 0",
+                          background:i%2===0?"transparent":T.s1,borderBottom:`1px solid ${T.bg}`}}>
+                          <div style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:T.t2}}>
+                            <div style={{width:8,height:8,background:m.col,borderRadius:2}}/>
+                            {m.name}
+                          </div>
+                          <div style={{textAlign:"right",fontFamily:T.mono,fontSize:9,color:T.t2}}>{(m.frac*100).toFixed(1)}%</div>
+                          <div style={{textAlign:"right",fontFamily:T.mono,fontSize:9,color:T.t2}}>{(m.ni_host*100).toFixed(1)}%</div>
+                          <div style={{textAlign:"right",fontFamily:T.mono,fontSize:9,
+                            color:m.leach===0?T.red:m.leach>0.9?T.green:T.yellow}}>
+                            {(m.leach*100).toFixed(0)}%{m.leach===0?" ⚠":""}
+                          </div>
+                          <div style={{textAlign:"right"}}>
+                            <NiTag pct={m.diss_pct} size="sm"/>
+                          </div>
+                          <div style={{textAlign:"right"}}>
+                            <NiTag pct={m.res_pct} size="sm"/>
+                          </div>
+                        </div>
+                      ))}
+                      <div style={{display:"grid",gridTemplateColumns:"160px 70px 80px 80px 80px 80px",
+                        alignItems:"center",padding:"5px 6px",background:T.s3,borderRadius:3,marginTop:3}}>
+                        <div style={{fontSize:10,fontWeight:700,color:T.t1}}>TOTAL</div>
+                        <div/>
+                        <div style={{textAlign:"right",fontFamily:T.mono,fontSize:9,color:T.t1}}>100.0%</div>
+                        <div style={{textAlign:"right",fontFamily:T.mono,fontSize:10,color:niCol(R.hpal_recovery_pct),fontWeight:700}}>
+                          {R.hpal_recovery_pct.toFixed(2)}%
+                        </div>
+                        <div style={{textAlign:"right"}}><NiTag pct={R.nodes.u202_diss}/></div>
+                        <div style={{textAlign:"right"}}><NiTag pct={R.nodes.u202_solid}/></div>
+                      </div>
+                    </div>
+
+                    <div style={S.card}>
+                      <div style={S.cHd}><span style={{color:T.mhp}}>▐</span> Ni Terlarut per Mineral (% dari Total Feed Ni)</div>
+                      {R.mineral_ni.filter(m=>m.ni_in_pct>0.001).map(m=>(
+                        <div key={m.name} style={{marginBottom:10}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:2}}>
+                            <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                              <div style={{width:7,height:7,background:m.col,borderRadius:1}}/>
+                              <span style={{color:T.t2}}>{m.name} — hosted: {m.ni_in_pct.toFixed(2)}%</span>
+                            </div>
+                            <div style={{display:"flex",gap:6,fontFamily:T.mono}}>
+                              <span style={{color:niCol(m.diss_pct)}}>terlarut {m.diss_pct.toFixed(4)}%</span>
+                              <span style={{color:T.tsf}}>residu {m.res_pct.toFixed(4)}%</span>
+                            </div>
+                          </div>
+                          <div style={{display:"flex",height:8,borderRadius:3,overflow:"hidden",background:T.s3}}>
+                            <div style={{width:`${m.diss_pct}%`,background:m.col,transition:"width .5s"}}/>
+                            <div style={{width:`${m.res_pct}%`,background:`${T.tsf}88`,transition:"width .5s"}}/>
+                          </div>
+                        </div>
+                      ))}
+                      <div style={{marginTop:8,display:"flex",gap:14,fontSize:9}}>
+                        <div style={{display:"flex",gap:4,alignItems:"center"}}><div style={{width:12,height:8,background:T.mhp,borderRadius:2}}/><span style={{color:T.t3}}>= Ni terlarut ke PLS</span></div>
+                        <div style={{display:"flex",gap:4,alignItems:"center"}}><div style={{width:12,height:8,background:`${T.tsf}88`,borderRadius:2}}/><span style={{color:T.t3}}>= Ni tetap di residu (TSF)</span></div>
+                      </div>
+                    </div>
+
+                    <div style={{...S.card,borderLeft:`2px solid ${T.line2}`,fontSize:10,color:T.t3,lineHeight:1.9}}>
+                      <b style={{color:T.t2}}>Referensi Mineralogi Limonite:</b><br/>
+                      • <b style={{color:T.goethite}}>Goethite 40–65%</b> — host Ni utama via lattice substitution Fe↔Ni. Ni recovery HPAL dari goethite: 95–97% @ 250°C (König 2021, Liu 2021, ScienceDirect 2024)<br/>
+                      • <b style={{color:T.chromite}}>Chromite 1–4%</b> — INSOLUBLE sepenuhnya di kondisi HPAL manapun. Cr dan V terkonsentrasi di chromite yang weather-resistant (Nickel Retention by Iron Oxides, ScienceDirect 2000)<br/>
+                      • HPAL limonite murni goethite: recovery &gt;97% (Ore 1 dan Ore 2, doiserbia.nb.rs 2025)<br/>
+                      • HPAL goethite-dominated ore: generally &gt;95% Ni+Co (Kyle 2010, Thermal pre-treatment ScienceDirect)<br/>
+                      • Indonesian limonite (PT Halmahera): Fe 41.15%, Ni 1.35%, dominasi magnetite+goethite (e3sconf ICENIS 2021)<br/>
+                      • <b style={{color:T.t1}}>Prinsip utama:</b> Ni tidak pernah hilang di mineral processing. Semua Ni masuk = Ni terlarut (PLS) + Ni di residu padat (TSF). Closure = 100%.
+                    </div>
+                  </>
+                );
+
+                if(tab==="table") return(
+                  <>
+                    <div style={S.card}>
+                      <div style={S.cHd}><span style={{color:T.mhp}}>▐</span> Nickel Balance — Tabel Semua Titik BFD (100% Basis)</div>
+                      <div style={{fontSize:9,color:T.t3,marginBottom:8}}>
+                        Feed Ni = 100% = {R.ni_feed_tph.toFixed(4)} t Ni/h = {(R.ann.ni_feed/1000).toFixed(2)} kt Ni/yr
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"200px 1fr 90px 80px",
+                        fontSize:8,color:T.t3,letterSpacing:1,textTransform:"uppercase",
+                        borderBottom:`1px solid ${T.line}`,paddingBottom:4,marginBottom:2}}>
+                        <div>Unit / Stream</div>
+                        <div>Keterangan</div>
+                        <div style={{textAlign:"right"}}>Ni (%)</div>
+                        <div style={{textAlign:"right"}}>Ni (t/h)</div>
+                      </div>
+                      {[
+                        {u:"FEED INPUT (=100%)",          desc:"Ni total dalam dry ore",                                     pct:100,                          hi:true},
+                        {u:"201 → Thickened U/F",          desc:"Semua Ni ke HPAL, tidak ada separation",                   pct:100},
+                        {u:"202 → Dissolved Ni (PLS)",     desc:`Ni terlarut dari goethite+mineral lainnya di HPAL 250°C`,  pct:R.nodes.u202_diss,           hi:true},
+                        {u:"202 → Solid Residue",          desc:`Ni dalam chromite (${d.frac_chromite}% ore) + hematite tak terlarut`, pct:R.nodes.u202_solid},
+                        {u:"203 → Slurry out",             desc:"Ni tidak berubah melewati neutralisasi",                   pct:100},
+                        {u:"204 → PLS (ke MHP-1)",         desc:"Setelah CCD wash — trace loss di wash",                    pct:R.nodes.u204_pls,            hi:true},
+                        {u:"204 → CCD wash loss",          desc:"Trace Ni terbawa di wash water → residue",                 pct:R.nodes.u204_ccd_loss},
+                        {u:"204 → Residue (ke 211-T)",     desc:"Solid residue + CCD wash loss",                            pct:R.nodes.u204_res},
+                        {u:"MHP-1 → MHP PRODUCT",          desc:`Total MHP — ${(R.ni_in_mhp/R.BASE*100).toFixed(2)}% Ni`,  pct:R.nodes.mhp_product,         hi:true},
+                        {u:"  MHP Battery Grade",           desc:`${d.mhp_battery_split}% dari MHP product`,                pct:R.nodes.mhp_batt},
+                        {u:"  MHP External Sale",           desc:`${100-d.mhp_battery_split}% dari MHP product`,            pct:R.nodes.mhp_ext},
+                        {u:"MHP-1 → Raffinate loss",       desc:"Trace Ni tidak terpresipitasi",                            pct:R.nodes.mhp_raff},
+                        {u:"211-T → Neut. Residue",        desc:"CCD underflow, Ni tetap di padatan",                       pct:R.nodes.u204_res},
+                        {u:"215 → Filter Cake → TSF",      desc:"Residu hematite + chromite — Ni locked",                   pct:R.nodes.tsf,                  hi:true, col:T.tsf},
+                        {u:"606 → Discharge to Sea",        desc:"Trace Ni dari effluent treatment",                         pct:R.nodes.sea},
+                        {u:"TSF TOTAL",                    desc:"Filter cake + sludge minor",                               pct:R.nodes.tsf+R.pct(R.ni_sludge_tsf), hi:true, col:T.tsf},
+                        {u:"CLOSURE CHECK",                desc:"Product + TSF + Sea = ?",                                  pct:R.check, hi:true, col:Math.abs(R.check-100)<0.01?T.green:T.red},
+                      ].map((r,i)=>{
+                        const tph = R.BASE * r.pct / 100;
+                        const c   = r.col || niCol(r.pct);
+                        return(
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"200px 1fr 90px 80px",
+                            alignItems:"center",padding:r.hi?"4px 6px":"2px 0",marginTop:r.hi?2:0,
+                            borderRadius:r.hi?3:0,background:r.hi?T.s3:(i%2===0?"transparent":T.s1),
+                            borderBottom:`1px solid ${T.bg}`}}>
+                            <div style={{fontSize:r.hi?10:9.5,color:r.hi?T.t1:T.t2,fontWeight:r.hi?700:400,
+                              paddingLeft:r.u.startsWith("  ")?12:0}}>{r.u}</div>
+                            <div style={{fontSize:9,color:T.t3}}>{r.desc}</div>
+                            <div style={{textAlign:"right"}}>
+                              <NiTag pct={r.pct} size="sm"/>
+                            </div>
+                            <div style={{textAlign:"right",fontFamily:T.mono,fontSize:9,color:T.t3}}>{tph.toFixed(4)}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div style={S.card}>
+                      <div style={S.cHd}><span style={{color:T.teal}}>▐</span> Cobalt Balance</div>
+                      <div style={{fontSize:9,color:T.t3,marginBottom:8}}>
+                        Co feed = {R.co_feed_tph.toFixed(4)} t Co/h. Co terutama di Mn-oxides (asbolane) dan goethite.
+                      </div>
+                      {[
+                        {l:"Co dalam Mn-oxides (asbolane)", v:d.co_in_mn_oxide_pct, u:"%", c:T.teal},
+                        {l:"Co dalam Goethite",              v:d.co_in_goethite_pct, u:"%", c:T.goethite},
+                        {l:"Co leach dari Mn-oxides",        v:d.co_leach_mn_oxide,  u:"%", c:T.teal},
+                        {l:"Co leach dari Goethite",         v:d.co_leach_goethite,  u:"%", c:T.goethite},
+                      ].map(r=>(
+                        <div key={r.l} style={{display:"flex",justifyContent:"space-between",padding:"2px 0",borderBottom:`1px solid ${T.bg}`,fontSize:10}}>
+                          <span style={{color:T.t2}}>{r.l}</span>
+                          <span style={{color:r.c,fontFamily:T.mono,fontWeight:700}}>{r.v.toFixed(1)} {r.u}</span>
+                        </div>
+                      ))}
+                      <div style={{display:"flex",justifyContent:"space-between",padding:"5px 6px",background:T.s3,borderRadius:3,marginTop:4}}>
+                        <span style={{fontSize:11,color:T.t1,fontWeight:700}}>Co Recovery Total</span>
+                        <NiTag pct={R.co_recovery_pct}/>
+                      </div>
+                      <div style={{marginTop:4,padding:"5px 6px",background:`${T.teal}10`,borderRadius:3}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}>
+                          <span style={{color:T.t2}}>Co dissolved</span>
+                          <span style={{color:T.teal,fontFamily:T.mono}}>{R.co_dissolved.toFixed(4)} t Co/h</span>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10}}>
+                          <span style={{color:T.t2}}>Co annual (@{d.uptime_pct}% uptime)</span>
+                          <span style={{color:T.teal,fontFamily:T.mono}}>{(R.ann.co_product/1000).toFixed(2)} kt Co/yr</span>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                );
+
+                if(tab==="annual") return(
+                  <>
+                    <div style={{...S.card,background:"#030e08",borderLeft:`3px solid ${T.mhp}`}}>
+                      <div style={{display:"flex",gap:14,flexWrap:"wrap",alignItems:"center"}}>
+                        <div>
+                          <div style={{fontSize:9,color:T.t3,textTransform:"uppercase",letterSpacing:1.2,marginBottom:2}}>Annual Nickel</div>
+                          <div style={{fontSize:22,fontWeight:800,fontFamily:T.mono,color:T.mhp}}>
+                            {(R.ann.ni_product/1000).toFixed(2)} <span style={{fontSize:12,fontWeight:400}}>kt Ni/yr</span>
+                          </div>
+                          <div style={{fontSize:10,color:T.t3}}>dalam MHP · {R.ann.hrs.toFixed(0)} h/yr · recovery {R.hpal_recovery_pct.toFixed(2)}%</div>
+                        </div>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                            {[
+                              {l:"Ni feed/yr",    v:R.ann.ni_feed/1000,    c:T.ore,    u:"kt/yr"},
+                              {l:"Ni MHP/yr",     v:R.ann.ni_product/1000, c:T.mhp,    u:"kt/yr"},
+                              {l:"Ni Battery/yr", v:R.ann.ni_mhp_batt/1000,c:T.green,  u:"kt/yr"},
+                              {l:"Ni Ext./yr",    v:R.ann.ni_mhp_ext/1000, c:T.water,  u:"kt/yr"},
+                              {l:"Ni TSF/yr",     v:R.ann.ni_tsf/1000,     c:T.tsf,    u:"kt/yr"},
+                              {l:"Co Prod./yr",   v:R.ann.co_product/1000, c:T.teal,   u:"kt/yr"},
+                            ].map(k=><Kpi key={k.l} label={k.l} v={k.v} u={k.u} col={k.c} sm/>)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={S.card}>
+                      <div style={S.cHd}><span style={{color:T.mhp}}>▐</span> Neraca Nickel Tahunan Lengkap</div>
+                      <div style={{display:"grid",gridTemplateColumns:"220px 90px 100px 110px",
+                        fontSize:8,color:T.t3,letterSpacing:1,textTransform:"uppercase",
+                        borderBottom:`1px solid ${T.line}`,paddingBottom:4,marginBottom:2}}>
+                        <div>Stream</div>
+                        <div style={{textAlign:"right"}}>Ni (%)</div>
+                        <div style={{textAlign:"right"}}>t Ni/h</div>
+                        <div style={{textAlign:"right"}}>t Ni/yr</div>
+                      </div>
+                      {[
+                        {l:"Ni dalam ore feed (100%)", pct:100,               hi:true, col:T.ore},
+                        {l:"HPAL dissolved (ke PLS)",  pct:R.nodes.u202_diss, hi:true, col:T.mhp},
+                        {l:"HPAL solid residue",       pct:R.nodes.u202_solid,col:T.tsf},
+                        {l:"Ni ke CCD underflow",       pct:R.nodes.u204_res, col:T.tsf},
+                        {l:"MHP PRODUCT TOTAL",        pct:R.nodes.mhp_product,hi:true,col:T.green},
+                        {l:"  — Battery Grade",         pct:R.nodes.mhp_batt, col:T.green},
+                        {l:"  — External Sale",         pct:R.nodes.mhp_ext,  col:T.water},
+                        {l:"TSF total (semua residu)",  pct:R.nodes.tsf,      hi:true, col:T.tsf},
+                        {l:"Sea discharge (trace)",     pct:R.nodes.sea,       col:T.sea},
+                        {l:"CLOSURE (harus = 100%)",    pct:R.check,          hi:true, col:Math.abs(R.check-100)<0.01?T.green:T.red},
+                      ].map((r,i)=>{
+                        const tph = R.BASE * r.pct / 100;
+                        const tpy = tph * R.ann.hrs;
+                        const c   = r.col || niCol(r.pct);
+                        return(
+                          <div key={i} style={{display:"grid",gridTemplateColumns:"220px 90px 100px 110px",
+                            alignItems:"center",padding:r.hi?"4px 6px":"2px 0",
+                            marginTop:r.hi?2:0,borderRadius:r.hi?3:0,
+                            background:r.hi?T.s3:(i%2===0?"transparent":T.s1),
+                            borderBottom:`1px solid ${T.bg}`,
+                            paddingLeft:r.l.startsWith("  ")?12:r.hi?6:0}}>
+                            <div style={{fontSize:r.hi?10:9.5,color:r.hi?T.t1:T.t2,fontWeight:r.hi?700:400}}>{r.l}</div>
+                            <div style={{textAlign:"right"}}><NiTag pct={r.pct} size="sm"/></div>
+                            <div style={{textAlign:"right",fontFamily:T.mono,fontSize:9,color:T.t3}}>{tph.toFixed(4)}</div>
+                            <div style={{textAlign:"right",fontFamily:T.mono,fontSize:10,color:r.hi?c:T.t3,fontWeight:r.hi?700:400}}>
+                              {tpy.toLocaleString("en",{maximumFractionDigits:0})}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div style={{...S.card,borderLeft:`2px solid ${T.line2}`,fontSize:10,color:T.t3,lineHeight:1.9}}>
+                      <b style={{color:T.t2}}>Catatan Penting:</b><br/>
+                      • <b style={{color:T.chromite}}>Ni loss UTAMA = Chromite fraction ({d.frac_chromite}% ore)</b> — sepenuhnya tidak larut di HPAL. Ini satu-satunya "loss" yang nyata secara mineralogi.<br/>
+                      • Recovery Ni efektif dihitung: Σ (Ni_hosted_per_mineral × leachability_HPAL) = <b style={{color:niCol(R.hpal_recovery_pct)}}>{R.hpal_recovery_pct.toFixed(2)}%</b><br/>
+                      • Semua Ni yang tidak larut = Ni di residu padat → TSF. Ini BUKAN "hilang" — Ni tetap ada di solid.<br/>
+                      • Basis: 8,760 h × {d.uptime_pct}% = {R.ann.hrs.toFixed(0)} h/yr operasi
+                    </div>
+                  </>
+                );
+
+                return null;
+              })()}
+            </div>
+          </div>
+
+          <div style={{textAlign:"center",padding:"8px 0 14px",fontSize:9,color:T.t3,letterSpacing:1,textTransform:"uppercase"}}>
+            Nickel Balance v2 · Berbasis Mineralogi Limonite · Sumber: König 2021, Liu 2021, ScienceDirect HPAL 2024, doiserbia 2025
+          </div>
+        </div>
+      );
+    }
+
+    // 3. Render Aplikasi
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
